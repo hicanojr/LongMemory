@@ -41,8 +41,24 @@ export function create_stdio_mcp(
     };
 }
 
+// Grace period after the handshake so tools/list, prompts/list and resources/list are
+// answered before the (synchronous, event-loop-blocking) store load starts.
+const warm_up_delay_ms = 2000;
+
 export async function run_mcp_stdio(config: mcp_server_config = {}): Promise<void> {
     const mcp = create_stdio_mcp(config);
+    // The store loads lazily; warm it up in the background once the client is initialized
+    // so the first tool call does not pay the full load cost.
+    mcp.server.server.oninitialized = () => {
+        setTimeout(() => {
+            try {
+                mcp.runtime.warm_up();
+            } catch (error) {
+                // Leave it to the first tool call to surface the error to the client.
+                process.stderr.write(`longmemory: background load failed: ${error instanceof Error ? error.message : String(error)}\n`);
+            }
+        }, warm_up_delay_ms).unref();
+    };
     await mcp.start();
     await new Promise<void>((resolve) => { mcp.transport.onclose = resolve; });
     await mcp.close();

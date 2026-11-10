@@ -44,7 +44,6 @@ export type mcp_runtime_config = {
 const current_project = (cwd: string) => basename(resolve(cwd)).toLowerCase().replace(/[^a-z0-9._-]+/g, '-') || 'current';
 
 export class mcp_runtime {
-    readonly memory: long_memory;
     readonly access: mcp_access;
     readonly audit: mcp_audit_log;
     readonly cwd: string;
@@ -52,6 +51,10 @@ export class mcp_runtime {
     private readonly tenant_id: string;
     private readonly connector_registry?: ConnectorRegistry;
     private readonly projects = new Map<string, project_memory>();
+    // Opening a large store loads and verifies every node synchronously, which can take
+    // tens of seconds. Defer it until first use so the MCP handshake answers immediately.
+    private loaded_memory?: long_memory;
+    private readonly load_memory: () => long_memory;
 
     constructor(config: mcp_runtime_config = {}) {
         this.cwd = resolve(config.cwd ?? process.cwd());
@@ -59,7 +62,8 @@ export class mcp_runtime {
         this.connector_registry = config.connector_registry;
         const embeddings = create_embedding_environment(config.env ?? process.env);
         const project_id = config.project_id === 'current' ? current_project(this.cwd) : config.project_id ?? null;
-        this.memory = config.memory ?? create_memory({
+        this.loaded_memory = config.memory;
+        this.load_memory = () => create_memory({
             store: config.db_path ? 'sqlite' : 'memory',
             db_path: config.db_path,
             tenant_id: this.tenant_id,
@@ -79,6 +83,20 @@ export class mcp_runtime {
             allowed_tools: create_tool_allowlist(config.allowed_tools),
         };
         this.audit = config.audit ?? new mcp_audit_log(config.audit_path ?? (config.db_path ? `${config.db_path}.mcp-audit.jsonl` : null));
+    }
+
+    get memory(): long_memory {
+        this.loaded_memory ??= this.load_memory();
+        return this.loaded_memory;
+    }
+
+    get memory_loaded(): boolean {
+        return this.loaded_memory !== undefined;
+    }
+
+    /** Load the memory store now instead of on the first tool call. */
+    warm_up(): void {
+        void this.memory;
     }
 
     async project(project_id?: string | null): Promise<project_memory> {
@@ -129,6 +147,6 @@ export class mcp_runtime {
 
     async close(): Promise<void> {
         for (const manager of this.projects.values()) await manager.close();
-        if (this.owns_memory) await this.memory.close();
+        if (this.owns_memory && this.loaded_memory) await this.loaded_memory.close();
     }
 }
